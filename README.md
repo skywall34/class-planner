@@ -6,7 +6,7 @@ A comprehensive platform that transforms research papers and documents into stru
 
 - **Document Upload**: Support for TXT, PDF, DOCX, and Markdown files
 - **AI-Powered Processing**: Multi-agent pipeline for intelligent content generation
-- **Real-time Progress**: WebSocket-based progress tracking with live updates
+- **Real-time Progress**: Server-Sent Events (SSE) based progress tracking with live updates
 - **Content Editing**: Built-in markdown editor with live preview
 - **Multiple Durations**: Support for week, multi-week, and semester courses
 - **Content Enhancement**: Optional research enhancement and cross-referencing
@@ -22,14 +22,14 @@ The platform consists of two main components:
 - **FastAPI**: High-performance REST API with automatic OpenAPI documentation
 - **SQLite**: Lightweight database for session and content management
 - **AI Agents**: Specialized LLM agents for different processing tasks
-- **WebSocket**: Real-time communication for progress updates
+- **Server-Sent Events**: Real-time communication for progress updates
 - **Security**: Rate limiting, input validation, and file type restrictions
 
 ### Frontend (Web)
 - **Modern HTML5/CSS3/JavaScript**: Clean, responsive web interface
 - **Tailwind CSS**: Utility-first CSS framework for rapid UI development
 - **Vite**: Fast build tool and development server
-- **WebSocket Client**: Real-time communication with backend
+- **EventSource Client**: Real-time communication with backend via SSE
 - **Markdown Rendering**: Live preview with syntax highlighting
 
 ## Project Structure
@@ -221,7 +221,8 @@ The platform uses a sophisticated multi-agent system to process documents:
 - `GET /api/download/{content_id}` - Download content (future feature)
 
 ### Real-time Communication
-- `WS /ws/{session_id}` - WebSocket connection for progress updates
+- `GET /api/events/{session_id}` - Server-Sent Events stream for progress updates
+- `POST /api/events/{event_id}/acknowledge` - Acknowledge received event
 
 ## Database Schema
 
@@ -266,7 +267,7 @@ The project includes custom Tailwind components:
 Vite is configured for:
 - Development server with API proxy
 - Hot module replacement
-- WebSocket proxy for real-time features
+- API proxy for backend communication
 - Production builds with optimization
 
 ## Development Tools
@@ -314,10 +315,10 @@ Vite is configured for:
    - Verify file size (max 10MB)
    - Check backend logs for errors
 
-4. **WebSocket connection fails**
+4. **SSE connection fails**
    - Ensure backend is running on port 8000
    - Check firewall settings
-   - Verify proxy configuration in Vite
+   - Verify API proxy configuration in Vite
 
 ### Logs and Debugging
 

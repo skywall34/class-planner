@@ -120,10 +120,25 @@ class SecurityManager:
         
         return True
     
-    def validate_duration(self, duration: str) -> bool:
-        """Validate duration parameter."""
-        valid_durations = {'week', 'multi_week', 'semester'}
-        return duration in valid_durations
+    def validate_user_prompt(self, user_prompt: str) -> bool:
+        """Validate user prompt parameter."""
+        # Allow empty prompts (will use default)
+        if not user_prompt:
+            return True
+        
+        # Limit prompt length to prevent abuse
+        max_length = 1000  # 1000 characters should be enough for instructions
+        if len(user_prompt) > max_length:
+            return False
+            
+        # Check for potentially malicious content (basic check)
+        dangerous_patterns = ['<script', 'javascript:', 'data:text/html', 'vbscript:']
+        user_prompt_lower = user_prompt.lower()
+        for pattern in dangerous_patterns:
+            if pattern in user_prompt_lower:
+                return False
+                
+        return True
     
     def hash_content(self, content: str) -> str:
         """Create hash of content for integrity checking."""
@@ -162,10 +177,10 @@ def validate_session_id(session_id: str):
             detail="Invalid session ID format."
         )
 
-def validate_duration(duration: str):
-    """Validate duration parameter."""
-    if not security_manager.validate_duration(duration):
+def validate_user_prompt(user_prompt: str):
+    """Validate user prompt parameter."""
+    if not security_manager.validate_user_prompt(user_prompt):
         raise HTTPException(
             status_code=400,
-            detail="Invalid duration. Must be 'week', 'multi_week', or 'semester'."
+            detail="Invalid user prompt. Please ensure it's under 1000 characters and doesn't contain malicious content."
         )

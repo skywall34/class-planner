@@ -1,18 +1,26 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import uuid
 import os
 import json
+import time
 from typing import Optional, List
 import asyncio
 from datetime import datetime
+from dotenv import load_dotenv
 
-from database import create_database, DatabaseManager
-from agents import ContentPipeline
-from models import SessionCreate, RevisionRequest, EnhancementRequest
+# Load environment variables from .env file
+load_dotenv(dotenv_path="../.env")
+
+from .database import create_database, DatabaseManager
+from .agents import ContentPipeline
+from .models import SessionCreate, RevisionRequest, EnhancementRequest
+from .security import validate_user_prompt
+from .content_saver import content_saver
+from .event_notifier import event_notifier
 
 app = FastAPI(title="GeneAcademy", description="Educational Content Generation Platform")
 
@@ -24,35 +32,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="../frontend/static"), name="static")
+# Get the path to frontend static files
+import pathlib
+frontend_static_path = pathlib.Path(__file__).parent.parent.parent / "frontend" / "static"
+app.mount("/static", StaticFiles(directory=str(frontend_static_path)), name="static")
 
 db_manager = DatabaseManager()
 pipeline = ContentPipeline()
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-        self.session_connections: dict = {}
-
-    async def connect(self, websocket: WebSocket, session_id: str):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        self.session_connections[session_id] = websocket
-
-    def disconnect(self, websocket: WebSocket, session_id: str):
-        self.active_connections.remove(websocket)
-        if session_id in self.session_connections:
-            del self.session_connections[session_id]
-
-    async def send_progress(self, session_id: str, message: dict):
-        if session_id in self.session_connections:
-            websocket = self.session_connections[session_id]
-            try:
-                await websocket.send_text(json.dumps(message))
-            except:
-                pass
-
-manager = ConnectionManager()
 
 @app.on_event("startup")
 async def startup_event():
@@ -60,7 +47,8 @@ async def startup_event():
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    with open("../frontend/templates/index.html", "r") as f:
+    template_path = pathlib.Path(__file__).parent.parent.parent / "frontend" / "templates" / "index.html"
+    with open(template_path, "r") as f:
         return HTMLResponse(content=f.read())
 
 @app.post("/api/session/create")
@@ -79,12 +67,15 @@ async def get_session(session_id: str):
 @app.post("/api/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    session_id: str = None,
-    duration: str = "week",
-    enhance: bool = False
+    session_id: str = Form(...),
+    user_prompt: str = Form(""),
+    enhance: bool = Form(False)
 ):
     if not session_id:
         raise HTTPException(status_code=400, detail="Session ID required")
+    
+    # Validate user prompt
+    validate_user_prompt(user_prompt)
     
     # Validate file type and size
     allowed_types = ['.txt', '.pdf', '.docx', '.md']
@@ -115,47 +106,30 @@ async def upload_document(
     # Update session status
     await db_manager.update_session_status(session_id, "processing")
     
-    # Send progress update
-    await manager.send_progress(session_id, {
-        "stage": "upload_complete",
-        "message": "Document uploaded successfully"
-    })
+    # Notify upload complete
+    await event_notifier.notify_upload_complete(session_id, file.filename, file.size)
     
     # Process document asynchronously
-    asyncio.create_task(process_document_async(session_id, doc_id, text_content, duration, enhance))
+    asyncio.create_task(process_document_async(session_id, doc_id, text_content, user_prompt, enhance))
     
     return {"message": "Document uploaded successfully", "document_id": doc_id}
 
-async def process_document_async(session_id: str, doc_id: str, text: str, duration: str, enhance: bool):
+async def process_document_async(session_id: str, doc_id: str, text: str, user_prompt: str, enhance: bool):
     try:
-        await manager.send_progress(session_id, {
-            "stage": "processing",
-            "message": "Starting content generation..."
-        })
-        
-        result = await pipeline.process_document(text, duration, enhance)
+        result = await pipeline.process_document(text, user_prompt, enhance, session_id)
         
         # Save generated content
         content_id = str(uuid.uuid4())
         await db_manager.save_generated_content(
-            content_id, doc_id, "ebook", duration, 
+            content_id, doc_id, "ebook", user_prompt, 
             result['content'], result['accuracy_score']
         )
         
         await db_manager.update_session_status(session_id, "completed")
         
-        await manager.send_progress(session_id, {
-            "stage": "completed",
-            "message": "Content generation completed",
-            "accuracy_score": result['accuracy_score']
-        })
-        
     except Exception as e:
         await db_manager.update_session_status(session_id, "error")
-        await manager.send_progress(session_id, {
-            "stage": "error",
-            "message": f"Error processing document: {str(e)}"
-        })
+        await event_notifier.notify_error(session_id, str(e))
 
 @app.get("/api/status/{session_id}")
 async def get_status(session_id: str):
@@ -186,15 +160,95 @@ async def download_content(content_id: str, format: str = "markdown"):
     # Download logic would go here
     return {"message": f"Download {format} requested", "content_id": content_id}
 
-@app.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    await manager.connect(websocket, session_id)
+@app.get("/api/content-saver/status")
+async def get_content_saver_status():
+    """Get the status of local content saving"""
+    return content_saver.get_content_summary()
+
+@app.get("/api/content-saver/files/{session_id}")
+async def get_saved_files(session_id: str):
+    """Get list of saved files for a session"""
+    return {
+        "session_id": session_id,
+        "files": content_saver.list_saved_content(session_id)
+    }
+
+@app.get("/api/events/{session_id}")
+async def stream_events(session_id: str):
+    """SSE endpoint for streaming processing events"""
+    
+    async def event_generator():
+        """Generate SSE events from database"""
+        try:
+            # Send initial connection event
+            yield f"data: {json.dumps({'event_type': 'connected', 'event_data': {'message': 'SSE connected', 'session_id': session_id}})}\n\n"
+            
+            last_check = 0
+            while True:
+                try:
+                    # Get unacknowledged events from database
+                    events = await db_manager.get_unacknowledged_events(session_id)
+                    
+                    for event in events:
+                        # Format as SSE event
+                        sse_data = {
+                            'id': event['id'],
+                            'event_type': event['event_type'],
+                            'event_data': event['event_data'],
+                            'created_at': event['created_at']
+                        }
+                        
+                        yield f"data: {json.dumps(sse_data)}\n\n"
+                        print(f"SSE sent: {event['event_type']} to {session_id[:8]}")
+                    
+                    # Clean up old events periodically
+                    current_time = time.time()
+                    if current_time - last_check > 300:  # Every 5 minutes
+                        await db_manager.cleanup_old_events(1)  # Clean up events older than 1 hour
+                        last_check = current_time
+                    
+                    # Wait before checking again
+                    await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    print(f"SSE error: {e}")
+                    yield f"data: {json.dumps({'event_type': 'error', 'event_data': {'message': f'Stream error: {str(e)}'}})}\n\n"
+                    break
+                    
+        except asyncio.CancelledError:
+            print(f"SSE connection cancelled for session {session_id[:8]}")
+        except Exception as e:
+            print(f"SSE generator error: {e}")
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+@app.post("/api/events/{event_id}/acknowledge")
+async def acknowledge_event(event_id: str):
+    """Mark an event as acknowledged"""
     try:
-        while True:
-            data = await websocket.receive_text()
-            # Handle any WebSocket messages if needed
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, session_id)
+        await db_manager.acknowledge_event(event_id)
+        return {"status": "acknowledged", "event_id": event_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to acknowledge event: {str(e)}")
+
+@app.get("/api/events/{session_id}/poll")
+async def poll_events(session_id: str):
+    """Polling endpoint as fallback if SSE doesn't work"""
+    try:
+        events = await db_manager.get_unacknowledged_events(session_id)
+        return {"events": events}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get events: {str(e)}")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

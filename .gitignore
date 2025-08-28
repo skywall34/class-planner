@@ -293,3 +293,6 @@ docs/build/
 CLAUDE.md
 PROJECT.md
 
+# Data files
+backend/data/*
+

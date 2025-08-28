@@ -7,7 +7,7 @@ class SessionCreate(BaseModel):
 
 class DocumentUpload(BaseModel):
     session_id: str
-    duration: str = "week"
+    user_prompt: str = ""
     enhance: bool = False
 
 class RevisionRequest(BaseModel):
@@ -28,7 +28,7 @@ class ContentResponse(BaseModel):
     content: str
     accuracy_score: Optional[float] = None
     content_type: str
-    duration: str
+    user_prompt: str
 
 class ProgressUpdate(BaseModel):
     stage: str

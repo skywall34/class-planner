@@ -152,17 +152,15 @@
                                 <p class="file-name text-sm font-medium text-gray-700 mt-3" id="file-name">No file selected</p>
                             </div>
                             
-                            <div class="grid md:grid-cols-2 gap-8">
+                            <div class="space-y-6">
                                 <div class="space-y-3">
-                                    <label for="duration" class="block text-sm font-semibold text-gray-800">Learning Duration:</label>
-                                    <select id="duration" name="duration" class="input-field-large">
-                                        <option value="week">1 Week Course</option>
-                                        <option value="multi_week">Multi-Week Course</option>
-                                        <option value="semester">Full Semester</option>
-                                    </select>
+                                    <label for="user-prompt" class="block text-sm font-semibold text-gray-800">Ebook Customization Instructions:</label>
+                                    <textarea id="user-prompt" name="user_prompt" rows="4" 
+                                              class="input-field-large resize-none" 
+                                              placeholder="Describe how you want your ebook structured. For example: 'Create a beginner-friendly guide with practical examples' or 'Focus on advanced concepts with case studies and detailed technical explanations' or leave blank for default structure."></textarea>
                                 </div>
                                 
-                                <div class="flex items-center space-x-3 pt-8">
+                                <div class="flex items-center space-x-3">
                                     <input type="checkbox" id="enhance" name="enhance" class="w-5 h-5 text-primary-600 bg-gray-100 border-2 border-gray-300 rounded focus:ring-primary-500 focus:ring-2">
                                     <label for="enhance" class="text-sm font-medium text-gray-800">Include research enhancement</label>
                                 </div>

@@ -1,24 +1,90 @@
 import time
 import json
+import asyncio
 from typing import Dict, Any, Optional
 from openai import OpenAI
 import os
-from database import DatabaseManager
+from .database import DatabaseManager
+from .template import EbookTemplate
+from .content_saver import content_saver
+from .event_notifier import event_notifier
 
 class LLMClient:
     def __init__(self):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "your-api-key-here"))
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # Minimum 1 second between requests
+        self.request_count = 0
+        self.request_window_start = time.time()
+        self.max_requests_per_minute = 20  # Conservative limit for API calls
+        self.current_session_id = None  # Will be set by ContentPipeline
     
-    async def generate_completion(self, prompt: str, max_tokens: int = 2000) -> str:
+    async def _enforce_rate_limit(self):
+        """Enforce rate limiting to prevent API quota exceeded errors"""
+        current_time = time.time()
+        
+        # Enforce minimum interval between requests
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < self.min_request_interval:
+            await asyncio.sleep(self.min_request_interval - time_since_last)
+        
+        # Reset counter if window has passed
+        if current_time - self.request_window_start > 60:
+            self.request_count = 0
+            self.request_window_start = current_time
+        
+        # Check if we're approaching the rate limit
+        if self.request_count >= self.max_requests_per_minute:
+            sleep_time = 60 - (current_time - self.request_window_start)
+            if sleep_time > 0:
+                print(f"Rate limit reached, waiting {sleep_time:.2f} seconds...")
+                await asyncio.sleep(sleep_time)
+                self.request_count = 0
+                self.request_window_start = time.time()
+        
+        self.last_request_time = time.time()
+        self.request_count += 1
+    
+    async def generate_completion(self, prompt: str, max_tokens: int = 2000, request_type: str = "general") -> str:
+        await self._enforce_rate_limit()
+        
+        request_start_time = time.time()
+        
+        # Notify LLM request started
+        if self.current_session_id:
+            await event_notifier.notify_llm_started(
+                self.current_session_id, request_type, self.request_count
+            )
+        
         try:
+            print(f"Making LLM request #{self.request_count} ({request_type}) at {time.strftime('%H:%M:%S')}")
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4.1",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
                 temperature=0.7
             )
+            
+            request_duration = time.time() - request_start_time
+            print(f"LLM request #{self.request_count} ({request_type}) completed in {request_duration:.2f}s")
+            
+            # Notify LLM request completed
+            if self.current_session_id:
+                await event_notifier.notify_llm_completed(
+                    self.current_session_id, request_type, self.request_count, request_duration
+                )
+            
             return response.choices[0].message.content
         except Exception as e:
+            request_duration = time.time() - request_start_time
+            print(f"LLM request #{self.request_count} ({request_type}) failed after {request_duration:.2f}s: {str(e)}")
+            
+            # Notify LLM request error
+            if self.current_session_id:
+                await event_notifier.notify_llm_error(
+                    self.current_session_id, request_type, self.request_count, str(e)
+                )
+                
             return f"Error generating content: {str(e)}"
 
 class SummarizationAgent:
@@ -28,25 +94,27 @@ class SummarizationAgent:
         Summarize the following research paper for educational purposes:
         - Extract main concepts and key findings
         - Identify learning objectives for students
-        - Create chapter outlines suitable for {duration} learning
+        - Create chapter outlines for educational content
         - Preserve technical accuracy and important details
         - Structure content in a logical learning progression
         
         Text: {text}
-        Duration: {duration}
+        User Requirements: {user_prompt}
         
         Please provide a structured summary with:
         1. Main Learning Objectives
         2. Key Concepts
         3. Chapter Outline
         4. Important Findings
+        
+        If the user provided specific requirements, ensure the summary addresses their needs.
         """
     
-    async def process(self, text: str, duration: str) -> Dict[str, Any]:
+    async def process(self, text: str, user_prompt: str) -> Dict[str, Any]:
         start_time = time.time()
         
-        prompt = self.prompt_template.format(text=text[:4000], duration=duration)
-        summary = await self.llm_client.generate_completion(prompt)
+        prompt = self.prompt_template.format(text=text[:4000], user_prompt=user_prompt or "Create a comprehensive educational resource")
+        summary = await self.llm_client.generate_completion(prompt, request_type="document_summarization")
         
         processing_time = time.time() - start_time
         
@@ -59,42 +127,172 @@ class SummarizationAgent:
 class ContentGenerationAgent:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
-        self.prompt_template = """
-        Create comprehensive educational ebook content from this summary:
-        - Include clear learning objectives for each chapter
-        - Add practical examples and case studies
-        - Structure content for {duration} learning timeline
-        - Format in clean markdown with proper headings
-        - Include exercises and review questions
-        - Make content engaging and accessible
+        self.template_generator = EbookTemplate()
+        
+        # Updated prompt to work with structured template
+        self.analysis_prompt = """
+        Analyze the following educational content summary and extract key information:
+        - Identify the main topic and create a suitable title
+        - List 5 key concepts that should be covered
+        - Identify any technical processes or procedures
+        - Note any quantitative aspects that might need calculators
+        - Suggest practical applications or case studies
+        - Determine the content structure based on user requirements
         
         Summary: {summary}
-        Duration: {duration}
+        User Requirements: {user_prompt}
         
-        Please create a complete ebook with:
-        # Title
-        ## Chapter 1: Introduction
-        ## Chapter 2: Core Concepts
-        ## Chapter 3: Advanced Topics
-        ## Chapter 4: Applications
-        ## Chapter 5: Conclusion and Next Steps
+        IMPORTANT: Pay special attention to the user requirements for structuring:
+        - If user mentions "days", "daily", "day-by-day" -> create daily structure
+        - If user mentions "weeks", "weekly" -> create weekly structure  
+        - If user mentions "modules", "lessons" -> create modular structure
+        - If user mentions "bootcamp", "intensive" -> create intensive daily structure
+        - Otherwise use standard chapter structure
         
-        Each chapter should include learning objectives, content, examples, and exercises.
+        Format your response as:
+        TITLE: [Main title for the ebook]
+        STRUCTURE_TYPE: [daily|weekly|modular|chapters] based on user requirements
+        STRUCTURE_COUNT: [number of days/weeks/modules/chapters to create]
+        KEY_CONCEPTS: [List 5 key concepts separated by semicolons]
+        TECHNICAL_PROCESSES: [List any technical processes]
+        QUANTITATIVE_ASPECTS: [List any calculations or measurements needed]
+        APPLICATIONS: [List practical applications]
+        """
+        
+        self.content_generation_prompt = """
+        Generate detailed educational content for this section:
+        
+        Topic: {topic}
+        Section: {section}
+        Context: {context}
+        User Requirements: {user_prompt}
+        
+        Requirements:
+        - Write 2-3 paragraphs of educational content
+        - Include specific examples where relevant
+        - Use clear, educational language
+        - Focus on practical understanding
+        - Adapt the content complexity and style based on user requirements
+        
+        If this is a technical process, include step-by-step explanations.
+        If this involves calculations, mention key formulas or relationships.
+        If the user specified particular needs, ensure they are addressed.
         """
     
-    async def generate_ebook(self, summary: str, duration: str) -> Dict[str, Any]:
+    async def generate_ebook(self, summary: str, user_prompt: str) -> Dict[str, Any]:
         start_time = time.time()
         
-        prompt = self.prompt_template.format(summary=summary, duration=duration)
-        ebook_content = await self.llm_client.generate_completion(prompt, max_tokens=3000)
+        # Step 1: Analyze the summary to extract structured information
+        analysis_prompt = self.analysis_prompt.format(summary=summary, user_prompt=user_prompt or "Create a comprehensive educational resource")
+        analysis_result = await self.llm_client.generate_completion(analysis_prompt, max_tokens=1000, request_type="content_analysis")
+        
+        # Parse the analysis result
+        title, structure_type, structure_count, key_concepts = self._parse_analysis(analysis_result)
+        
+        # Step 2: Generate custom structure based on analysis
+        chapters = self._generate_custom_structure(structure_type, structure_count, title)
+        
+        # Step 3: Generate content for each subsection
+        content_data = {}
+        for chapter in chapters:
+            if 'subsections' in chapter:
+                chapter['subsection_content'] = {}
+                for subsection in chapter['subsections']:
+                    content_prompt = self.content_generation_prompt.format(
+                        topic=title,
+                        section=f"{chapter['title']} - {subsection}",
+                        context=summary[:1500],
+                        user_prompt=user_prompt or "Create comprehensive educational content"
+                    )
+                    
+                    # Increase token limit for more comprehensive content, especially for daily/modular content
+                    token_limit = 1500 if structure_type in ["daily", "weekly", "modular"] else 800
+                    subsection_content = await self.llm_client.generate_completion(content_prompt, max_tokens=token_limit, request_type=f"content_generation_{subsection.lower().replace(' ', '_')}")
+                    chapter['subsection_content'][subsection] = subsection_content
+        
+        # Step 4: Generate the final markdown using the template
+        ebook_content = self.template_generator.generate_template(title, chapters, content_data)
         
         processing_time = time.time() - start_time
         
         return {
             'content': ebook_content,
             'processing_time': processing_time,
-            'agent_type': 'generator'
+            'agent_type': 'generator',
+            'title': title,
+            'key_concepts': key_concepts
         }
+    
+    def _parse_analysis(self, analysis_text: str) -> tuple:
+        """Parse the analysis result to extract title, structure info, and key concepts"""
+        title = "Educational Content"
+        structure_type = "chapters"
+        structure_count = 5
+        key_concepts = []
+        
+        lines = analysis_text.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith('TITLE:'):
+                title = line.replace('TITLE:', '').strip()
+            elif line.startswith('STRUCTURE_TYPE:'):
+                structure_type = line.replace('STRUCTURE_TYPE:', '').strip()
+            elif line.startswith('STRUCTURE_COUNT:'):
+                try:
+                    count_text = line.replace('STRUCTURE_COUNT:', '').strip()
+                    structure_count = int(''.join(filter(str.isdigit, count_text))) or 5
+                except:
+                    structure_count = 5
+            elif line.startswith('KEY_CONCEPTS:'):
+                concepts_text = line.replace('KEY_CONCEPTS:', '').strip()
+                key_concepts = [concept.strip() for concept in concepts_text.split(';') if concept.strip()]
+        
+        return title, structure_type, structure_count, key_concepts
+    
+    def _generate_custom_structure(self, structure_type: str, structure_count: int, title: str) -> list:
+        """Generate custom chapter structure based on analysis"""
+        chapters = []
+        
+        if structure_type == "daily":
+            for day in range(1, min(structure_count + 1, 11)):  # Cap at 10 days to prevent excessive content
+                chapters.append({
+                    "title": f"Day {day}",
+                    "description": f"Learning objectives and materials for Day {day}",
+                    "subsections": [
+                        "Learning Objectives",
+                        "Lecture Materials", 
+                        "Practice Materials",
+                        "Assessment"
+                    ]
+                })
+        elif structure_type == "weekly":
+            for week in range(1, min(structure_count + 1, 9)):  # Cap at 8 weeks
+                chapters.append({
+                    "title": f"Week {week}",
+                    "description": f"Week {week} curriculum and activities",
+                    "subsections": [
+                        "Weekly Overview",
+                        "Key Topics",
+                        "Activities and Exercises",
+                        "Week Assessment"
+                    ]
+                })
+        elif structure_type == "modular":
+            for module in range(1, min(structure_count + 1, 9)):  # Cap at 8 modules
+                chapters.append({
+                    "title": f"Module {module}",
+                    "description": f"Module {module} learning content",
+                    "subsections": [
+                        "Module Overview",
+                        "Core Content",
+                        "Practical Applications",
+                        "Module Assessment"
+                    ]
+                })
+        else:  # Default to chapters
+            return self.template_generator.get_default_structure()
+        
+        return chapters
 
 class AccuracyReviewAgent:
     def __init__(self, llm_client: LLMClient):
@@ -124,7 +322,7 @@ class AccuracyReviewAgent:
             original=original[:2000], 
             generated=generated[:2000]
         )
-        review_result = await self.llm_client.generate_completion(prompt)
+        review_result = await self.llm_client.generate_completion(prompt, request_type="accuracy_review")
         
         # Extract accuracy score (simplified parsing)
         try:
@@ -171,7 +369,7 @@ class ResearchEnhancementAgent:
         start_time = time.time()
         
         prompt = self.prompt_template.format(content=content[:2000])
-        enhanced_content = await self.llm_client.generate_completion(prompt, max_tokens=2500)
+        enhanced_content = await self.llm_client.generate_completion(prompt, max_tokens=2500, request_type="content_enhancement")
         
         processing_time = time.time() - start_time
         
@@ -201,7 +399,7 @@ class RevisionAgent:
         start_time = time.time()
         
         prompt = self.prompt_template.format(content=content[:2000], feedback=feedback)
-        revised_content = await self.llm_client.generate_completion(prompt, max_tokens=2500)
+        revised_content = await self.llm_client.generate_completion(prompt, max_tokens=2500, request_type="content_revision")
         
         processing_time = time.time() - start_time
         
@@ -221,27 +419,68 @@ class ContentPipeline:
         self.revisor = RevisionAgent(self.llm_client)
         self.db_manager = DatabaseManager()
     
-    async def process_document(self, document: str, duration: str, enhance: bool = False, session_id: str = None) -> Dict[str, Any]:
+    async def process_document(self, document: str, user_prompt: str, enhance: bool = False, session_id: str = None) -> Dict[str, Any]:
+        start_time = time.time()
         results = {}
         
+        # Set up session for event notifications
+        if session_id:
+            self.llm_client.current_session_id = session_id
+        
         # Step 1: Summarize
-        summary_result = await self.summarizer.process(document, duration)
+        if session_id:
+            await event_notifier.notify_agent_started(session_id, "summarizer")
+        
+        summary_result = await self.summarizer.process(document, user_prompt)
         results['summary'] = summary_result['summary']
+        
+        if session_id:
+            await event_notifier.notify_agent_completed(session_id, "summarizer", summary_result['processing_time'], "generator")
         
         if session_id:
             await self.db_manager.log_agent_activity(
                 session_id, 'summarizer', document[:500], 
                 summary_result['summary'][:500], summary_result['processing_time']
             )
+            # Save agent log locally
+            content_saver.save_agent_log(
+                session_id, 'summarizer', document[:1000],
+                summary_result['summary'], summary_result['processing_time']
+            )
         
-        # Step 2: Generate ebook
-        ebook_result = await self.generator.generate_ebook(summary_result['summary'], duration)
+        # Step 2: Generate ebook  
+        if session_id:
+            await event_notifier.notify_agent_started(session_id, "generator")
+        
+        ebook_result = await self.generator.generate_ebook(summary_result['summary'], user_prompt)
         results['content'] = ebook_result['content']
+        
+        if session_id:
+            await event_notifier.notify_agent_completed(session_id, "generator", ebook_result['processing_time'], "reviewer")
         
         if session_id:
             await self.db_manager.log_agent_activity(
                 session_id, 'generator', summary_result['summary'][:500],
                 ebook_result['content'][:500], ebook_result['processing_time']
+            )
+            # Save agent log locally
+            content_saver.save_agent_log(
+                session_id, 'generator', summary_result['summary'][:1000],
+                ebook_result['content'][:2000], ebook_result['processing_time']
+            )
+            # Save the final ebook content locally
+            saved_file = content_saver.save_content(
+                session_id, ebook_result['content'], user_prompt,
+                content_type="ebook", metadata={
+                    'title': ebook_result.get('title', 'Generated Content'),
+                    'key_concepts': ebook_result.get('key_concepts', []),
+                    'processing_time': ebook_result['processing_time']
+                }
+            )
+            
+            # Notify content saved
+            await event_notifier.notify_content_saved(
+                session_id, "ebook", len(ebook_result['content']), saved_file
             )
         
         # Step 3: Review for accuracy
@@ -278,5 +517,12 @@ class ContentPipeline:
                     session_id, 'enhancer', results['content'][:500],
                     enhancement_result['enhanced_content'][:500], enhancement_result['processing_time']
                 )
+        
+        # Notify processing complete
+        if session_id:
+            total_time = time.time() - start_time
+            await event_notifier.notify_processing_complete(
+                session_id, results['accuracy_score'], total_time, "content_generated"
+            )
         
         return results

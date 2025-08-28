@@ -1,7 +1,6 @@
 class GeneAcademy {
     constructor() {
         this.sessionId = null;
-        this.websocket = null;
         this.currentContent = '';
         this.isEditing = false;
         
@@ -178,15 +177,15 @@ class GeneAcademy {
         // Prepare form data
         formData.append('file', file);
         formData.append('session_id', this.sessionId);
-        formData.append('duration', document.getElementById('duration').value);
+        formData.append('user_prompt', document.getElementById('user-prompt').value.trim());
         formData.append('enhance', document.getElementById('enhance').checked);
 
         // Show progress section
         this.showSection('progress');
         this.setProgress(0, 'Uploading document...');
         
-        // Setup WebSocket for progress updates
-        this.setupWebSocket();
+        // Setup SSE for progress updates
+        this.setupEventSource();
 
         try {
             const response = await fetch('/api/upload', {
@@ -208,46 +207,136 @@ class GeneAcademy {
         }
     }
 
-    setupWebSocket() {
-        if (this.websocket) {
-            this.websocket.close();
+    setupEventSource() {
+        // Close existing connection if any
+        if (this.eventSource) {
+            this.eventSource.close();
         }
 
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/${this.sessionId}`;
+        // Determine the correct SSE URL based on current host
+        let sseUrl;
+        if (window.location.port === '3000') {
+            // Frontend dev server - use proxy
+            sseUrl = `/api/events/${this.sessionId}`;
+        } else {
+            // Direct backend access
+            const backendHost = window.location.hostname + ':8000';
+            sseUrl = `http://${backendHost}/api/events/${this.sessionId}`;
+        }
         
-        this.websocket = new WebSocket(wsUrl);
+        console.log(`Connecting to SSE: ${sseUrl}`);
+        this.eventSource = new EventSource(sseUrl);
+        this.sseUrl = sseUrl;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
         
-        this.websocket.onopen = () => {
-            console.log('WebSocket connected');
+        this.eventSource.onopen = () => {
+            console.log('SSE connected');
+            this.reconnectAttempts = 0;
         };
         
-        this.websocket.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            this.handleProgressUpdate(data);
+        this.eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('SSE event received:', data.event_type, data.event_data?.message);
+                
+                // Handle different event types
+                if (data.event_type === 'connected') {
+                    console.log('SSE connection confirmed');
+                } else if (data.event_type === 'heartbeat') {
+                    console.log('Heartbeat received:', data.event_data.message);
+                    // Don't show heartbeat messages to user, just log them
+                } else {
+                    this.handleProgressUpdate(data.event_data);
+                    
+                    // Acknowledge the event
+                    this.acknowledgeEvent(data.id);
+                }
+            } catch (e) {
+                console.error('Error parsing SSE data:', e, event.data);
+            }
         };
         
-        this.websocket.onerror = (error) => {
-            console.error('WebSocket error:', error);
+        this.eventSource.onerror = (error) => {
+            console.error('SSE error:', error);
+            
+            // SSE will automatically reconnect, but we can add manual retry logic
+            if (this.eventSource.readyState === EventSource.CLOSED) {
+                console.log('SSE connection closed, attempting manual reconnect...');
+                this.reconnectSSE();
+            }
         };
-        
-        this.websocket.onclose = () => {
-            console.log('WebSocket closed');
-        };
+    }
+    
+    reconnectSSE() {
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 30000); // Exponential backoff
+            
+            console.log(`Attempting SSE reconnect in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+            
+            setTimeout(() => {
+                this.setupEventSource();
+            }, delay);
+        } else {
+            console.error('Max SSE reconnection attempts reached');
+            this.showError('Connection lost. Please refresh the page if processing seems stuck.');
+        }
+    }
+    
+    async acknowledgeEvent(eventId) {
+        try {
+            await fetch(`/api/events/${eventId}/acknowledge`, {
+                method: 'POST'
+            });
+        } catch (error) {
+            console.error('Failed to acknowledge event:', eventId, error);
+        }
     }
 
     handleProgressUpdate(data) {
-        const { stage, message, accuracy_score } = data;
+        const { stage, message, accuracy_score, request_count, duration } = data;
         
         switch (stage) {
+            case 'connected':
+                console.log('SSE connection confirmed');
+                break;
             case 'upload_complete':
                 this.setProgress(25, message);
                 this.updateAIStep(1, 'active');
                 break;
             case 'processing':
-                this.setProgress(50, message);
+                this.setProgress(40, message);
                 this.updateAIStep(1, 'completed');
                 this.updateAIStep(2, 'active');
+                break;
+            case 'llm_processing':
+                // Show which specific LLM request is being processed
+                const progressIncrement = Math.min(40 + (request_count * 8), 85); // Progress based on request count, capped at 85%
+                this.setProgress(progressIncrement, `${message} (Request #${request_count})`);
+                this.updateAIStep(2, 'active');
+                break;
+            case 'llm_completed':
+                console.log(`LLM request completed: ${message}`);
+                // Update progress slightly for completed requests
+                if (request_count <= 3) {
+                    this.updateAIStep(2, 'active');
+                } else {
+                    this.updateAIStep(3, 'active');
+                }
+                break;
+            case 'llm_error':
+                this.showError(`LLM Processing Error: ${message}`);
+                this.updateAIStep(2, 'error');
+                break;
+            case 'agent_completed':
+                console.log(`Agent completed: ${message}`);
+                // Update AI steps based on agent progress
+                this.updateAIStep(3, 'active');
+                break;
+            case 'content_saved':
+                console.log(`Content saved: ${message}`);
+                this.updateAIStep(4, 'active');
                 break;
             case 'completed':
                 this.setProgress(100, 'Content generation completed!');
@@ -263,6 +352,8 @@ class GeneAcademy {
                 this.showError('Processing failed: ' + message);
                 this.showSection('upload');
                 break;
+            default:
+                console.log('Progress update:', stage, message);
         }
     }
 
