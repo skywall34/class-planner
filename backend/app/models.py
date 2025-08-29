@@ -3,7 +3,7 @@ from typing import Optional, List
 from datetime import datetime
 
 class SessionCreate(BaseModel):
-    user_ip: Optional[str] = None
+    pass
 
 class DocumentUpload(BaseModel):
     session_id: str

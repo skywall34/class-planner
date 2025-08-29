@@ -88,9 +88,7 @@ class GeneAcademy {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({
-                    user_ip: this.getClientIP()
-                })
+                body: JSON.stringify({})
             });
             
             const data = await response.json();
@@ -102,10 +100,6 @@ class GeneAcademy {
         }
     }
 
-    getClientIP() {
-        // This is a simplified version - in production you'd want proper IP detection
-        return 'unknown';
-    }
 
     handleFileSelect(event) {
         const file = event.target.files[0];
@@ -248,9 +242,7 @@ class GeneAcademy {
                     // Don't show heartbeat messages to user, just log them
                 } else {
                     this.handleProgressUpdate(data.event_data);
-                    
-                    // Acknowledge the event
-                    this.acknowledgeEvent(data.id);
+                    // Note: Events are now auto-acknowledged on the backend
                 }
             } catch (e) {
                 console.error('Error parsing SSE data:', e, event.data);

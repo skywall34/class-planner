@@ -52,9 +52,9 @@ async def read_root():
         return HTMLResponse(content=f.read())
 
 @app.post("/api/session/create")
-async def create_session(request: SessionCreate):
+async def create_session(request_data: SessionCreate):
     session_id = str(uuid.uuid4())
-    await db_manager.create_session(session_id, request.user_ip or "unknown")
+    await db_manager.create_session(session_id)
     return {"session_id": session_id}
 
 @app.get("/api/session/{session_id}")
@@ -180,16 +180,26 @@ async def stream_events(session_id: str):
     async def event_generator():
         """Generate SSE events from database"""
         try:
-            # Send initial connection event
-            yield f"data: {json.dumps({'event_type': 'connected', 'event_data': {'message': 'SSE connected', 'session_id': session_id}})}\n\n"
+            # Send initial connection event with proper formatting
+            initial_event = json.dumps({
+                'event_type': 'connected', 
+                'event_data': {'message': 'SSE connected', 'session_id': session_id}
+            })
+            yield f"data: {initial_event}\n\n"
             
             last_check = 0
+            sent_event_ids = set()  # Track sent events to avoid duplicates
+            
             while True:
                 try:
                     # Get unacknowledged events from database
                     events = await db_manager.get_unacknowledged_events(session_id)
                     
                     for event in events:
+                        # Skip if we've already sent this event
+                        if event['id'] in sent_event_ids:
+                            continue
+                            
                         # Format as SSE event
                         sse_data = {
                             'id': event['id'],
@@ -198,17 +208,31 @@ async def stream_events(session_id: str):
                             'created_at': event['created_at']
                         }
                         
-                        yield f"data: {json.dumps(sse_data)}\n\n"
+                        # Send the event with proper newlines and immediate flush
+                        event_data = json.dumps(sse_data)
+                        yield f"data: {event_data}\n\n"
+                        
+                        # Track that we sent this event
+                        sent_event_ids.add(event['id'])
+                        
                         print(f"SSE sent: {event['event_type']} to {session_id[:8]}")
+                        
+                        # Auto-acknowledge the event immediately after sending
+                        try:
+                            await db_manager.acknowledge_event(event['id'])
+                        except Exception as ack_error:
+                            print(f"Error auto-acknowledging event {event['id']}: {ack_error}")
                     
                     # Clean up old events periodically
                     current_time = time.time()
                     if current_time - last_check > 300:  # Every 5 minutes
                         await db_manager.cleanup_old_events(1)  # Clean up events older than 1 hour
                         last_check = current_time
+                        # Clear sent events cache periodically
+                        sent_event_ids.clear()
                     
-                    # Wait before checking again
-                    await asyncio.sleep(1)
+                    # Shorter wait for more responsive updates
+                    await asyncio.sleep(0.5)
                     
                 except Exception as e:
                     print(f"SSE error: {e}")
@@ -224,10 +248,13 @@ async def stream_events(session_id: str):
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "*",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
         }
     )
 

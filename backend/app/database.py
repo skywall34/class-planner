@@ -140,11 +140,11 @@ class DatabaseManager:
     def __init__(self):
         self.db_path = DATABASE_PATH
     
-    async def create_session(self, session_id: str, user_ip: str):
+    async def create_session(self, session_id: str):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO sessions (id, user_ip, status) VALUES (?, ?, 'active')",
-                (session_id, user_ip)
+                "INSERT INTO sessions (id, status) VALUES (?, 'active')",
+                (session_id,)
             )
             await db.commit()
     

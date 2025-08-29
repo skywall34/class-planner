@@ -45,7 +45,7 @@ class LLMClient:
         self.last_request_time = time.time()
         self.request_count += 1
     
-    async def generate_completion(self, prompt: str, max_tokens: int = 2000, request_type: str = "general") -> str:
+    async def generate_completion(self, prompt: str, max_tokens: int = 2000, request_type: str = "general", model: str = "gpt-4.1") -> str:
         await self._enforce_rate_limit()
         
         request_start_time = time.time()
@@ -57,9 +57,9 @@ class LLMClient:
             )
         
         try:
-            print(f"Making LLM request #{self.request_count} ({request_type}) at {time.strftime('%H:%M:%S')}")
+            print(f"Making LLM request #{self.request_count} ({request_type}) with {model} at {time.strftime('%H:%M:%S')}")
             response = self.client.chat.completions.create(
-                model="gpt-4.1",
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
                 temperature=0.7
@@ -91,30 +91,25 @@ class SummarizationAgent:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.prompt_template = """
-        Summarize the following research paper for educational purposes:
-        - Extract main concepts and key findings
-        - Identify learning objectives for students
-        - Create chapter outlines for educational content
-        - Preserve technical accuracy and important details
-        - Structure content in a logical learning progression
+        Summarize this research paper for educational purposes. Extract main concepts and key findings, identify learning objectives for students, create chapter outlines for educational content, preserve technical accuracy and important details, and structure content in a logical learning progression.
         
         Text: {text}
         User Requirements: {user_prompt}
         
-        Please provide a structured summary with:
+        Provide only a structured summary with these sections:
         1. Main Learning Objectives
         2. Key Concepts
         3. Chapter Outline
         4. Important Findings
         
-        If the user provided specific requirements, ensure the summary addresses their needs.
+        Do not include any introductory text, preamble, or conclusions. Start directly with the learning objectives.
         """
     
     async def process(self, text: str, user_prompt: str) -> Dict[str, Any]:
         start_time = time.time()
         
         prompt = self.prompt_template.format(text=text[:4000], user_prompt=user_prompt or "Create a comprehensive educational resource")
-        summary = await self.llm_client.generate_completion(prompt, request_type="document_summarization")
+        summary = await self.llm_client.generate_completion(prompt, request_type="document_summarization", model="gpt-3.5-turbo")
         
         processing_time = time.time() - start_time
         
@@ -160,23 +155,18 @@ class ContentGenerationAgent:
         """
         
         self.content_generation_prompt = """
-        Generate detailed educational content for this section:
+        Generate detailed educational content for: {section}
         
         Topic: {topic}
-        Section: {section}
         Context: {context}
         User Requirements: {user_prompt}
         
-        Requirements:
-        - Write 2-3 paragraphs of educational content
-        - Include specific examples where relevant
-        - Use clear, educational language
-        - Focus on practical understanding
-        - Adapt the content complexity and style based on user requirements
+        Write 2-3 paragraphs of educational content with specific examples where relevant. Use clear, educational language and focus on practical understanding. Adapt content complexity based on user requirements.
         
-        If this is a technical process, include step-by-step explanations.
-        If this involves calculations, mention key formulas or relationships.
-        If the user specified particular needs, ensure they are addressed.
+        For technical processes, include step-by-step explanations.
+        For calculations, mention key formulas or relationships.
+        
+        Provide only the educational content without any introductory phrases like "Here is the content" or "This section covers". Start directly with the educational material.
         """
     
     async def generate_ebook(self, summary: str, user_prompt: str) -> Dict[str, Any]:
@@ -184,7 +174,7 @@ class ContentGenerationAgent:
         
         # Step 1: Analyze the summary to extract structured information
         analysis_prompt = self.analysis_prompt.format(summary=summary, user_prompt=user_prompt or "Create a comprehensive educational resource")
-        analysis_result = await self.llm_client.generate_completion(analysis_prompt, max_tokens=1000, request_type="content_analysis")
+        analysis_result = await self.llm_client.generate_completion(analysis_prompt, max_tokens=1000, request_type="content_analysis", model="gpt-3.5-turbo")
         
         # Parse the analysis result
         title, structure_type, structure_count, key_concepts = self._parse_analysis(analysis_result)
@@ -298,21 +288,18 @@ class AccuracyReviewAgent:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.prompt_template = """
-        Review the generated educational content for accuracy against the original source:
-        - Compare key facts and concepts
-        - Check for any misrepresentations or errors
-        - Verify technical details and terminology
-        - Rate overall accuracy on a scale of 0-100
-        - Suggest specific corrections if needed
+        Review this educational content for accuracy against the original source. Compare key facts and concepts, check for misrepresentations or errors, verify technical details and terminology, and rate overall accuracy on a scale of 0-100.
         
         Original Source: {original}
         Generated Content: {generated}
         
-        Please provide:
+        Provide only:
         1. Accuracy Score (0-100)
         2. List of any factual errors found
         3. Suggested corrections
         4. Overall assessment
+        
+        Do not include introductory text. Start directly with the accuracy score.
         """
     
     async def review(self, original: str, generated: str) -> Dict[str, Any]:
@@ -322,7 +309,7 @@ class AccuracyReviewAgent:
             original=original[:2000], 
             generated=generated[:2000]
         )
-        review_result = await self.llm_client.generate_completion(prompt, request_type="accuracy_review")
+        review_result = await self.llm_client.generate_completion(prompt, request_type="accuracy_review", model="gpt-3.5-turbo")
         
         # Extract accuracy score (simplified parsing)
         try:
@@ -349,27 +336,24 @@ class ResearchEnhancementAgent:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.prompt_template = """
-        Enhance the educational content with additional valuable resources:
-        - Add related concepts and background information
-        - Include real-world applications and examples
-        - Suggest case studies relevant to the topic
-        - Add references to further reading
-        - Include current industry trends if applicable
+        Enhance this educational content with additional valuable resources. Add related concepts and background information, include real-world applications and examples, suggest case studies relevant to the topic, add references to further reading, and include current industry trends if applicable.
         
         Content: {content}
         
-        Please enhance the content by:
+        Enhance the content by:
         1. Adding relevant background context
         2. Including practical applications
         3. Suggesting additional resources
         4. Adding current examples or case studies
+        
+        Provide only the enhanced content without any introductory phrases. Start directly with the enhanced material.
         """
     
     async def enhance(self, content: str) -> Dict[str, Any]:
         start_time = time.time()
         
         prompt = self.prompt_template.format(content=content[:2000])
-        enhanced_content = await self.llm_client.generate_completion(prompt, max_tokens=2500, request_type="content_enhancement")
+        enhanced_content = await self.llm_client.generate_completion(prompt, max_tokens=2500, request_type="content_enhancement", model="gpt-3.5-turbo")
         
         processing_time = time.time() - start_time
         
@@ -383,23 +367,19 @@ class RevisionAgent:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.prompt_template = """
-        Revise the educational content based on the provided feedback:
-        - Apply the requested changes carefully
-        - Maintain content consistency and flow
-        - Preserve educational value and accuracy
-        - Keep the same overall structure unless requested otherwise
+        Revise this educational content based on the provided feedback. Apply the requested changes carefully, maintain content consistency and flow, preserve educational value and accuracy, and keep the same overall structure unless requested otherwise.
         
         Original Content: {content}
         User Feedback: {feedback}
         
-        Please provide the revised content that addresses the feedback while maintaining quality.
+        Provide only the revised content that addresses the feedback while maintaining quality. Do not include any introductory phrases. Start directly with the revised material.
         """
     
     async def revise(self, content: str, feedback: str) -> Dict[str, Any]:
         start_time = time.time()
         
         prompt = self.prompt_template.format(content=content[:2000], feedback=feedback)
-        revised_content = await self.llm_client.generate_completion(prompt, max_tokens=2500, request_type="content_revision")
+        revised_content = await self.llm_client.generate_completion(prompt, max_tokens=2500, request_type="content_revision", model="gpt-3.5-turbo")
         
         processing_time = time.time() - start_time
         
